@@ -1,0 +1,156 @@
+const moment = require("moment");
+var axios = require('axios');
+let path = Runtime.getFunctions()['dialer-assets'].path;
+let assets = require(path); 
+
+const recalculateCallAfterTime = function (retriesMin) {
+    // const { RETRY_TIME_IN_MINUTES } = process.env;
+    console.log("MINUTOS POR AÑADIR: " +parseInt(retriesMin))
+    return moment().add(parseInt(retriesMin), "minutes").format("HHmm");
+}
+
+const finishDialerTask = async function (client, workspaceSid, taskSid) {
+   return client.taskrouter.workspaces(workspaceSid) 
+     .tasks(taskSid)
+     .update({
+        assignmentStatus: 'completed',
+      });
+}
+
+const getDialerTask = async function (client, workspaceSid, taskSid) {
+    return client.taskrouter.workspaces(workspaceSid)
+        .tasks(taskSid)
+        .fetch()
+ }
+
+const updateCurrentNumberIdx = async function(client, workspaceSid, task, newValue) {
+    
+    const { sid, attributes } = task;
+    const parsedAttributes = JSON.parse(attributes);
+    const newAttributes = {
+        ...parsedAttributes, 
+        currentNumberIdx: newValue, 
+        customers: {
+            phone: parsedAttributes.numbers[newValue] 
+        }
+    };
+    
+    return client.taskrouter.workspaces(workspaceSid)
+     .tasks(sid)
+     .update({
+         attributes: JSON.stringify(newAttributes)
+      });
+}
+
+const makeCall = async function(client, task, currentNumberIdx) {
+    
+    const { sid, attributes } = task;
+    const { queue, numbers, callerId, name } = JSON.parse(attributes);
+    const { DOMAIN } = process.env;
+
+	await client.calls.create({
+        url: `https://${DOMAIN}/evaluate-call?taskSid=${sid}&queue=${encodeURIComponent(queue)}`,
+        statusCallback: `https://${DOMAIN}/evaluate-complete-call?taskSid=${sid}`,
+        name: name,
+        to: numbers[currentNumberIdx],
+        from: "+"+callerId[attempts-1].phoneNumber,
+        machineDetection: 'Enable'
+    });
+}
+
+exports.handler = async function(context, event, callback) {
+    
+    const client = context.getTwilioClient();
+
+    const task = await getDialerTask(client, context.WORKSPACE_SID, event.taskSid);
+    
+    if(task.assignmentStatus !== "completed") {
+        
+        await assets.changeDialerCapacity(client, context, [event.queue]);
+        
+       await assets.updateTaskToReporting(client, context, event.taskSid, (attrs) => ({
+            ...attrs,
+            conversations: {
+                ...attrs.conversations,
+                content: "Tried to call",
+                outcome: "machine_start"
+            }
+        }));
+        const attributes = JSON.parse(task.attributes);
+        console.log("IZEI-LOG: ",attributes)
+        if (attributes.info?.sfOpportunityId) {
+            let accountID = attributes.info.sfOpportunityId
+            console.log(accountID)
+            let date = new Date();
+            let fromC= attributes.callerId[attributes.attempts-1].phoneNumber;
+            let toC=attributes.customers.phone;
+            console.log(fromC)
+            console.log(toC)
+            let subStatus = attributes.retries == attributes.attempts ? "Incontactable" : "Machine Started"
+            var data = JSON.stringify({
+              "attributesTaskSF": {
+                "objectName": "Task",
+                "WhatId": accountID,
+                "Subject": "PD - Call",
+                "SubStatus__c": subStatus,
+                "Type": "Call",
+                "Twilio_Task_Sid__c": event.taskSid,
+                "From__c": fromC,
+                "To__c": toC,
+                "Status": "Completed",
+                "ActivityDate": date,
+                "Attempts__c": attributes.attempts
+              }
+            });
+            
+            var config = {
+              method: 'post',
+              url: `https://${context.DOMAIN}/conectSF/create-task-sf`,
+              headers: { 
+                'Content-Type': 'application/json', 
+                'Authorization': 'Basic '+Buffer.from(context.TWILIO_ACCOUNT_SID+':'+context.TWILIO_AUTH_TOKEN).toString('base64')
+              },
+              data : data
+            };
+            
+            axios(config)
+            .then(function (response) {
+              console.log(JSON.stringify(response.data));
+            })
+            .catch(function (error) {
+              console.log(error);
+            });
+        };
+        if(attributes.retries >= (attributes.attempts + 1)) {
+            
+            if(attributes.numbers.length > (attributes.currentNumberIdx + 1)) {
+                console.log("REALIZA LLAMADA");
+                await updateCurrentNumberIdx(client, context.WORKSPACE_SID, task, attributes.currentNumberIdx + 1);
+                await makeCall(client, task, attributes.currentNumberIdx + 1);
+                
+            } else {
+                console.log("ENTRO AL METODO");
+                await finishDialerTask(client, context.WORKSPACE_SID, event.taskSid)
+                await client.taskrouter.workspaces(context.WORKSPACE_SID)
+                 .tasks
+                 .create({ attributes: JSON.stringify({
+                     ...attributes,
+                     conversations: {
+                       ...attributes.conversations,
+                        conversation_attribute_6: attributes.attempts + 1,
+                        content: "Retrying"
+                     },
+                     attempts: attributes.attempts + 1,
+                     callAfterTime: parseInt(recalculateCallAfterTime(attributes.retriesMin)),
+                     currentNumberIdx: 0
+                }), workflowSid: process.env.WORKFLOW_SID });
+                
+            }
+        } else {
+            await finishDialerTask(client, context.WORKSPACE_SID, event.taskSid);
+        }
+          
+    }
+ 
+    callback(null);
+};
