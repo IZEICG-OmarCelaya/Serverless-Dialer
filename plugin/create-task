@@ -1,0 +1,103 @@
+const TokenValidator = require('twilio-flex-token-validator').functionValidator;
+let path = Runtime.getFunctions()['plugin/utils'].path;
+let assets = require(path);
+
+const capitalize = (s) => {
+
+  if (typeof s !== 'string') return ''
+
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+exports.handler = TokenValidator(async (context, event, callback) => {
+
+  try {
+
+    const client = context.getTwilioClient();
+    const campaign = event.campaign ? event.campaign : ""
+    let attribu = await client.taskrouter.v1.workspaces(context.WORKSPACE_SID)
+      .workers
+      .list({
+        friendlyName: campaign,
+        limit: 1
+      })
+      .then(workers => { return (workers[0].attributes) });
+    const contact = JSON.parse(event.contact);
+    let botAttributes = JSON.parse(attribu);
+    console.log("IZEI-LOG: ", attribu);
+    const batchCode = event.batchCode ? event.batchCode : ""
+    const destination = contact.destination
+    const name = contact.name ? contact.name : ""
+    const queue = contact.queue || botAttributes.queue;
+    const info = contact.info ? contact.info : ""
+    const externalId = contact.externalId ? contact.externalId : ""
+    const callerId = contact.callerId;
+    const Attempts = botAttributes.Attemps ? botAttributes.Attemps : 2;
+    const retriesMin = botAttributes.retriMin ? botAttributes.retriMin : 60;
+    let callersIDS = [];
+    callersIDS.push({phoneNumber: callerId})
+    callersIDS.push({phoneNumber: callerId})
+    callersIDS.push({phoneNumber: callerId})
+    console.log("Callers ID: ", callersIDS)
+    console.log(campaign)
+    console.log(destination)
+    console.log(name)
+    console.log(queue)
+    console.log(Attempts)
+    console.log(retriesMin)
+
+    let optionalInfo = [];
+    let actions = [];
+
+    Object.keys(info).forEach((key) => {
+
+      if (key.match("")) {
+
+        actions = [...actions, { name: capitalize(key.replace("action_", "")), value: info[key] }];
+
+      } else {
+
+        optionalInfo = [...optionalInfo, { name: capitalize(key), value: info[key] }];
+
+      }
+
+    })
+
+    await client.taskrouter.workspaces(context.WORKSPACE_SID)
+      .tasks
+      .create({
+        attributes: JSON.stringify({
+          name: "PD - " + name,
+          type:"Power Dialer",
+          queue,
+          dialer: true,
+          attempts: 1,
+          callAfterTime: 0,
+          retries: Attempts,
+          retriesMin: retriesMin,
+          numbers: [destination],
+          currentNumberIdx: 0,
+          channel: "voice",
+          callerId: callersIDS,
+          externalId: externalId,
+          requiredInfo: {
+            name,
+            campaign
+          },
+          optionalInfo,
+          actions,
+          batchCode
+        }
+        ), workflowSid: context.WORKFLOW_SID
+      });
+
+    callback(null, assets.response("json", {}));
+
+  } catch (err) {
+
+    callback(err);
+
+  }
+
+
+});
