@@ -1,0 +1,91 @@
+let path = Runtime.getFunctions()['dialer-assets'].path;
+let assets = require(path);
+
+exports.handler = async function (context, event, callback) {
+
+    const client = context.getTwilioClient();
+    const {  DOMAIN } = context;
+    const { CallSid, AnsweredBy, taskSid, queue } = event;
+    console.log(JSON.stringify(event))
+    let reason;
+    let twiml;
+    console.log("AnsweredBy: " + AnsweredBy)
+    if (AnsweredBy === "human" || AnsweredBy === "unknown") {
+        console.log("ENTRO AL IF");
+        twiml = new Twilio.twiml.VoiceResponse();
+        const previousTask = await assets.updateTaskToReporting(client, context, taskSid, (attrs) => ({
+            ...attrs,
+            conversations: {
+                ...attrs.conversations,
+                content: "Sent to flex",
+                outcome: AnsweredBy
+            },
+        }));
+        console.log("LOG 1",previousTask)
+        const previousTaskAttributes = JSON.parse(previousTask.attributes);
+        console.log("LOG 2",previousTaskAttributes)
+        const campaignBot = previousTaskAttributes.requiredInfo.campaign ? previousTaskAttributes.requiredInfo.campaign : ""
+        console.log("previous",previousTaskAttributes.requiredInfo.campaign)
+        let attribu = await client.taskrouter.v1.workspaces(context.WORKSPACE_SID)
+          .workers
+          .list({
+            friendlyName: campaignBot,
+            limit: 1
+          })
+          .then(workers => { return (workers[0].attributes) });
+          console.log("Imp 2",JSON.parse(attribu).queue)
+          console.log("Imp 3",JSON.parse(attribu))
+        twiml.enqueue({
+            workflowSid: context.WORKFLOW_SID,
+            waitUrl: queue !== '' ? `https://${DOMAIN}/mute-wait-music?queueBot=${encodeURIComponent(JSON.parse(attribu).queue)}`:''
+        }).task({}, JSON.stringify({
+            type:previousTaskAttributes.type,
+            info: previousTaskAttributes.info,
+            dialer: false,
+            queue,
+            name: previousTaskAttributes.name,
+            attempts: previousTaskAttributes.attempts,
+            conversations: {
+                conversation_id: previousTaskAttributes.conversations.conversation_id,
+                direction: "Outbound",
+                preceded_by: "Power Dialer",
+                external_contact: previousTaskAttributes.callerId[previousTaskAttributes.attempts-1].phoneNumber,
+                campaign: previousTaskAttributes.conversations.campaign,
+                workflow: previousTaskAttributes.conversations.workflow,
+                content: "Agent call",
+                outcome: AnsweredBy,
+                conversation_attribute_1: "",
+                conversation_attribute_2: "",
+                hang_up_by: "Customer",
+                externalId: previousTaskAttributes.externalId,
+                case: previousTaskAttributes.externalId
+            },
+            customers: previousTaskAttributes.customers,
+            optionalInfo: previousTaskAttributes.optionalInfo,
+            actions: previousTaskAttributes.actions
+        }));
+
+        reason = "Call sent to Queue";
+        await client.taskrouter.workspaces(context.WORKSPACE_SID)
+            .tasks(taskSid)
+            .update({
+                assignmentStatus: 'completed',
+                reason
+            });
+
+        console.log("human");
+    } else {
+        console.log("not human");
+
+        await assets.changeDialerCapacity(client, context, [queue]);
+
+        twiml = new Twilio.twiml.VoiceResponse();
+        twiml.hangup();
+        reason = "Call failed";
+    }
+
+    await client.calls(CallSid)
+        .update({ twiml: twiml.toString() })
+
+    callback(null);
+};
